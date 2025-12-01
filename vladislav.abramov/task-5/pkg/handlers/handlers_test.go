@@ -5,6 +5,8 @@ import (
 	"testing"
 	"time"
 
+  "github.com/15446-rus75/task-5/pkg/conveyer"
+  "github.com/15446-rus75/task-5/pkg/handler"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
