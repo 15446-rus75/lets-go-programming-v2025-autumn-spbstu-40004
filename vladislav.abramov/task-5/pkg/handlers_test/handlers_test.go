@@ -8,7 +8,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	"gihtub.com/15446-rus75/task-5/pkg/handlers"
+	"github.com/15446-rus75/task-5/pkg/handlers"
 )
 
 func TestPrefixDecoratorFunc_Basic(t *testing.T) {
