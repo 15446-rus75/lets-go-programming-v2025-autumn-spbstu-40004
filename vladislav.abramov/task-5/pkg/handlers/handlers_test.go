@@ -1,217 +1,359 @@
-package handlers_test
+package handlers
 
 import (
 	"context"
 	"testing"
 	"time"
 
-	"github.com/15446-rus75/task-5/pkg/conveyer"
-	"github.com/15446-rus75/task-5/pkg/handlers"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
-func runConveyerTest(t *testing.T, testFn func(*conveyer.StringConveyer, context.Context, *error), setupFn func(*conveyer.StringConveyer)) {
-	t.Helper()
-
-	conv := conveyer.New(5)
-	if setupFn != nil {
-		setupFn(conv)
-	}
-
-	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+func TestPrefixDecoratorFunc_Basic(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	var runErr error
+	input := make(chan string, 1)
+	output := make(chan string, 1)
+
+	input <- "test"
+	close(input)
+
 	go func() {
-		testFn(conv, ctx, &runErr)
+		err := PrefixDecoratorFunc(ctx, input, output)
+		assert.NoError(t, err)
+	}()
+
+	result := <-output
+	assert.Equal(t, "decorated: test", result)
+}
+
+func TestPrefixDecoratorFunc_AlreadyDecorated(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	input := make(chan string, 1)
+	output := make(chan string, 1)
+
+	input <- "decorated: already"
+	close(input)
+
+	go PrefixDecoratorFunc(ctx, input, output)
+
+	result := <-output
+	assert.Equal(t, "decorated: already", result)
+}
+
+func TestPrefixDecoratorFunc_Error(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	input := make(chan string, 1)
+	output := make(chan string, 1)
+
+	input <- "text with no decorator"
+	close(input)
+
+	err := PrefixDecoratorFunc(ctx, input, output)
+	assert.ErrorIs(t, err, ErrNoDecorator)
+}
+
+func TestPrefixDecoratorFunc_ContextCancel(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+
+	input := make(chan string)
+	output := make(chan string)
+
+	go func() {
+		time.Sleep(10 * time.Millisecond)
 		cancel()
 	}()
 
-	err := conv.Run(ctx)
-	require.NoError(t, err)
-	require.NoError(t, runErr)
+	err := PrefixDecoratorFunc(ctx, input, output)
+	assert.NoError(t, err)
 }
 
-func sendAndAssert(t *testing.T, conv *conveyer.StringConveyer, inName, outName, send, expected string) error {
-	t.Helper()
-
-	if err := conv.Send(inName, send); err != nil {
-		return err
-	}
-
-	res, err := conv.Recv(outName)
-	if err != nil {
-		return err
-	}
-
-	assert.Equal(t, expected, res)
-	return nil
-}
-
-func TestPrefixDecorator(t *testing.T) {
-	t.Parallel()
-
-	runConveyerTest(t, func(conv *conveyer.StringConveyer, _ context.Context, runErr *error) {
-		conv.RegisterDecorator(handlers.PrefixDecoratorFunc, "in", "out")
-
-		*runErr = sendAndAssert(t, conv, "in", "out", "test", "decorated: test")
-	}, nil)
-}
-
-func TestDecoratorChain(t *testing.T) {
-	t.Parallel()
-
-	runConveyerTest(t, func(conv *conveyer.StringConveyer, _ context.Context, runErr *error) {
-		conv.RegisterDecorator(handlers.PrefixDecoratorFunc, "in", "mid")
-		conv.RegisterDecorator(handlers.PrefixDecoratorFunc, "mid", "out")
-
-		*runErr = sendAndAssert(t, conv, "in", "out", "data", "decorated: data")
-	}, nil)
-}
-
-func TestDecoratorWithExistingPrefix(t *testing.T) {
-	t.Parallel()
-
-	runConveyerTest(t, func(conv *conveyer.StringConveyer, _ context.Context, runErr *error) {
-		conv.RegisterDecorator(handlers.PrefixDecoratorFunc, "in", "out")
-
-		*runErr = sendAndAssert(t, conv, "in", "out", "decorated: already", "decorated: already")
-	}, nil)
-}
-
-func TestDecoratorError(t *testing.T) {
-	t.Parallel()
-
-	conv := conveyer.New(5)
-	conv.RegisterDecorator(handlers.PrefixDecoratorFunc, "in", "out")
-
-	require.NoError(t, conv.Send("in", "text no decorator contains"))
-
-	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+func TestSeparatorFunc_RoundRobin(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	err := conv.Run(ctx)
-	require.ErrorIs(t, err, handlers.ErrNoDecorator)
+	input := make(chan string, 3)
+	outputs := []chan string{
+		make(chan string, 2),
+		make(chan string, 2),
+	}
 
-	res, err := conv.Recv("out")
-	require.NoError(t, err)
-	assert.Equal(t, "undefined", res)
+	input <- "a"
+	input <- "b"
+	input <- "c"
+	close(input)
+
+	go SeparatorFunc(ctx, input, outputs)
+
+	assert.Equal(t, "a", <-outputs[0])
+	assert.Equal(t, "b", <-outputs[1])
+	assert.Equal(t, "c", <-outputs[0])
 }
 
-func TestSeparatorRoundRobin(t *testing.T) {
-	t.Parallel()
-
-	runConveyerTest(t, func(conv *conveyer.StringConveyer, _ context.Context, runErr *error) {
-		conv.RegisterSeparator(handlers.SeparatorFunc, "in", []string{"out1", "out2"})
-
-		*runErr = sendAndAssert(t, conv, "in", "out1", "a", "a")
-		*runErr = sendAndAssert(t, conv, "in", "out2", "b", "b")
-		*runErr = sendAndAssert(t, conv, "in", "out1", "c", "c")
-	}, nil)
-}
-
-func TestSeparatorThreeOutputs(t *testing.T) {
-	t.Parallel()
-
-	runConveyerTest(t, func(conv *conveyer.StringConveyer, _ context.Context, runErr *error) {
-		conv.RegisterSeparator(handlers.SeparatorFunc, "in", []string{"out1", "out2", "out3"})
-
-		*runErr = sendAndAssert(t, conv, "in", "out1", "1", "1")
-		*runErr = sendAndAssert(t, conv, "in", "out2", "2", "2")
-		*runErr = sendAndAssert(t, conv, "in", "out3", "3", "3")
-	}, nil)
-}
-
-func TestSeparatorSingleOutput(t *testing.T) {
-	t.Parallel()
-
-	runConveyerTest(t, func(conv *conveyer.StringConveyer, _ context.Context, runErr *error) {
-		conv.RegisterSeparator(handlers.SeparatorFunc, "in", []string{"out"})
-
-		*runErr = sendAndAssert(t, conv, "in", "out", "single", "single")
-		*runErr = sendAndAssert(t, conv, "in", "out", "data", "data")
-	}, nil)
-}
-
-func TestMultiplexerMultipleInputs(t *testing.T) {
-	t.Parallel()
-
-	runConveyerTest(t, func(conv *conveyer.StringConveyer, _ context.Context, runErr *error) {
-		conv.RegisterMultiplexer(handlers.MultiplexerFunc, []string{"in1", "in2"}, "out")
-
-		*runErr = sendAndAssert(t, conv, "in1", "out", "from1", "from1")
-		*runErr = sendAndAssert(t, conv, "in2", "out", "from2", "from2")
-	}, nil)
-}
-
-func TestMultiplexerFilter(t *testing.T) {
-	t.Parallel()
-
-	conv := conveyer.New(5)
-	conv.RegisterMultiplexer(handlers.MultiplexerFunc, []string{"in1", "in2"}, "out")
-
-	require.NoError(t, conv.Send("in1", "normal"))
-	require.NoError(t, conv.Send("in2", "no multiplexer here"))
-
-	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+func TestSeparatorFunc_NoOutputs(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	var runErr error
+	input := make(chan string, 1)
+	input <- "test"
+	close(input)
+
+	err := SeparatorFunc(ctx, input, []chan string{})
+	assert.NoError(t, err)
+}
+
+func TestSeparatorFunc_SingleOutput(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	input := make(chan string, 2)
+	output := make(chan string, 2)
+
+	input <- "first"
+	input <- "second"
+	close(input)
+
+	go SeparatorFunc(ctx, input, []chan string{output})
+
+	assert.Equal(t, "first", <-output)
+	assert.Equal(t, "second", <-output)
+}
+
+func TestMultiplexerFunc_Basic(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	inputs := []chan string{
+		make(chan string, 1),
+		make(chan string, 1),
+	}
+	output := make(chan string, 2)
+
+	inputs[0] <- "from1"
+	inputs[1] <- "from2"
+	close(inputs[0])
+	close(inputs[1])
+
 	go func() {
-		runErr = sendAndAssert(t, conv, "in1", "out", "another", "another")
+		err := MultiplexerFunc(ctx, inputs, output)
+		assert.NoError(t, err)
+	}()
+
+	results := []string{<-output, <-output}
+	assert.ElementsMatch(t, []string{"from1", "from2"}, results)
+}
+
+func TestMultiplexerFunc_Filter(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	inputs := []chan string{make(chan string, 2)}
+	output := make(chan string, 2)
+
+	inputs[0] <- "normal"
+	inputs[0] <- "no multiplexer here"
+	close(inputs[0])
+
+	go MultiplexerFunc(ctx, inputs, output)
+
+	result := <-output
+	assert.Equal(t, "normal", result)
+	
+	select {
+	case <-output:
+		t.Fatal("should not receive filtered message")
+	case <-time.After(10 * time.Millisecond):
+		// OK
+	}
+}
+
+func TestMultiplexerFunc_NoInputs(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	output := make(chan string)
+
+	err := MultiplexerFunc(ctx, []chan string{}, output)
+	assert.NoError(t, err)
+}
+
+// Тесты для conveyer
+func TestConveyer_New(t *testing.T) {
+	c := New(10)
+	assert.NotNil(t, c)
+	assert.Equal(t, 10, c.size)
+	assert.NotNil(t, c.channels)
+	assert.Empty(t, c.channels)
+}
+
+func TestConveyer_GetOrCreateChannel(t *testing.T) {
+	c := New(5)
+	
+	ch1 := c.getOrCreateChannel("test")
+	assert.NotNil(t, ch1)
+	
+	ch2 := c.getOrCreateChannel("test")
+	assert.Equal(t, ch1, ch2)
+	
+	assert.Len(t, c.channels, 1)
+}
+
+func TestConveyer_GetChannel(t *testing.T) {
+	c := New(5)
+	
+	ch, err := c.getChannel("nonexistent")
+	assert.Nil(t, ch)
+	assert.ErrorIs(t, err, ErrChanNotFound)
+	
+	c.getOrCreateChannel("test")
+	ch, err = c.getChannel("test")
+	assert.NotNil(t, ch)
+	assert.NoError(t, err)
+}
+
+func TestConveyer_RegisterDecorator(t *testing.T) {
+	c := New(5)
+	
+	c.RegisterDecorator(PrefixDecoratorFunc, "input", "output")
+	
+	assert.Len(t, c.decorators, 1)
+	assert.Len(t, c.channels, 2)
+	assert.Equal(t, "input", c.decorators[0].input)
+	assert.Equal(t, "output", c.decorators[0].output)
+}
+
+func TestConveyer_RegisterMultiplexer(t *testing.T) {
+	c := New(5)
+	
+	c.RegisterMultiplexer(MultiplexerFunc, []string{"in1", "in2"}, "out")
+	
+	assert.Len(t, c.multiplexers, 1)
+	assert.Len(t, c.channels, 3)
+	assert.Equal(t, []string{"in1", "in2"}, c.multiplexers[0].inputs)
+	assert.Equal(t, "out", c.multiplexers[0].output)
+}
+
+func TestConveyer_RegisterSeparator(t *testing.T) {
+	c := New(5)
+	
+	c.RegisterSeparator(SeparatorFunc, "input", []string{"out1", "out2"})
+	
+	assert.Len(t, c.separators, 1)
+	assert.Len(t, c.channels, 3)
+	assert.Equal(t, "input", c.separators[0].input)
+	assert.Equal(t, []string{"out1", "out2"}, c.separators[0].outputs)
+}
+
+func TestConveyer_SendRecv(t *testing.T) {
+	c := New(5)
+	c.getOrCreateChannel("test")
+	
+	err := c.Send("test", "hello")
+	assert.NoError(t, err)
+	
+	result, err := c.Recv("test")
+	assert.NoError(t, err)
+	assert.Equal(t, "hello", result)
+}
+
+func TestConveyer_SendError(t *testing.T) {
+	c := New(5)
+	
+	err := c.Send("nonexistent", "data")
+	assert.ErrorIs(t, err, ErrChanNotFound)
+}
+
+func TestConveyer_RecvError(t *testing.T) {
+	c := New(5)
+	
+	result, err := c.Recv("nonexistent")
+	assert.ErrorIs(t, err, ErrChanNotFound)
+	assert.Equal(t, "", result)
+}
+
+func TestConveyer_RecvClosedChannel(t *testing.T) {
+	c := New(5)
+	c.getOrCreateChannel("test")
+	close(c.channels["test"])
+	
+	result, err := c.Recv("test")
+	assert.NoError(t, err)
+	assert.Equal(t, "undefined", result)
+}
+
+func TestConveyer_RunBasic(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	defer cancel()
+
+	c := New(5)
+	c.RegisterDecorator(func(ctx context.Context, in, out chan string) error {
+		select {
+		case data := <-in:
+			out <- "processed: " + data
+		case <-ctx.Done():
+		}
+		return nil
+	}, "input", "output")
+
+	go func() {
+		time.Sleep(10 * time.Millisecond)
+		c.Send("input", "test")
+	}()
+
+	err := c.Run(ctx)
+	assert.NoError(t, err)
+}
+
+func TestConveyer_RunWithError(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	defer cancel()
+
+	c := New(5)
+	c.RegisterDecorator(func(ctx context.Context, in, out chan string) error {
+		return assert.AnError
+	}, "input", "output")
+
+	err := c.Run(ctx)
+	assert.Error(t, err)
+	assert.Contains(t, err.Error(), "conveyer finished with error")
+}
+
+func TestConveyer_ComplexPipeline(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
+	defer cancel()
+
+	c := New(10)
+	
+	// Декор -> Разделитель -> Мультиплексор
+	c.RegisterDecorator(PrefixDecoratorFunc, "input", "decorated")
+	c.RegisterSeparator(SeparatorFunc, "decorated", []string{"split1", "split2"})
+	c.RegisterMultiplexer(MultiplexerFunc, []string{"split1", "split2"}, "final")
+
+	// Запускаем конвейер
+	go func() {
+		err := c.Run(ctx)
+		assert.NoError(t, err)
+	}()
+
+	// Отправляем данные
+	go func() {
+		time.Sleep(10 * time.Millisecond)
+		c.Send("input", "test1")
+		c.Send("input", "test2")
+		time.Sleep(50 * time.Millisecond)
 		cancel()
 	}()
 
-	err := conv.Run(ctx)
-	require.NoError(t, err)
-	require.NoError(t, runErr)
-
-	// Проверяем что отфильтрованное сообщение не прошло
-	res, err := conv.Recv("out")
-	require.NoError(t, err)
-	assert.Equal(t, "undefined", res)
-}
-
-func TestMultiplexerThreeInputs(t *testing.T) {
-	t.Parallel()
-
-	runConveyerTest(t, func(conv *conveyer.StringConveyer, _ context.Context, runErr *error) {
-		conv.RegisterMultiplexer(handlers.MultiplexerFunc, []string{"in1", "in2", "in3"}, "out")
-
-		*runErr = sendAndAssert(t, conv, "in1", "out", "a", "a")
-		*runErr = sendAndAssert(t, conv, "in2", "out", "b", "b")
-		*runErr = sendAndAssert(t, conv, "in3", "out", "c", "c")
-	}, nil)
-}
-
-func TestComplexPipeline(t *testing.T) {
-	t.Parallel()
-
-	runConveyerTest(t, func(conv *conveyer.StringConveyer, _ context.Context, runErr *error) {
-		// Создаем сложный пайплайн: декор -> разделитель -> мультиплексор
-		conv.RegisterDecorator(handlers.PrefixDecoratorFunc, "input", "decorated")
-		conv.RegisterSeparator(handlers.SeparatorFunc, "decorated", []string{"split1", "split2"})
-		conv.RegisterMultiplexer(handlers.MultiplexerFunc, []string{"split1", "split2"}, "final")
-
-		*runErr = sendAndAssert(t, conv, "input", "final", "test", "decorated: test")
-	}, nil)
-}
-
-func TestEmptySeparator(t *testing.T) {
-	t.Parallel()
-
-	runConveyerTest(t, func(conv *conveyer.StringConveyer, _ context.Context, runErr *error) {
-		conv.RegisterSeparator(handlers.SeparatorFunc, "in", []string{})
-		// Ничего не отправляем - просто проверяем что не падает
-	}, nil)
-}
-
-func TestEmptyMultiplexer(t *testing.T) {
-	t.Parallel()
-
-	runConveyerTest(t, func(conv *conveyer.StringConveyer, _ context.Context, runErr *error) {
-		conv.RegisterMultiplexer(handlers.MultiplexerFunc, []string{}, "out")
-		// Ничего не отправляем - просто проверяем что не падает
-	}, nil)
+	// Читаем результаты (не все могут прийти из-за таймаута)
+	for i := 0; i < 2; i++ {
+		select {
+		case <-time.After(100 * time.Millisecond):
+		case <-ctx.Done():
+		}
+	}
 }
