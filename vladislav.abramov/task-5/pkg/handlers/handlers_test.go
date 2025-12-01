@@ -5,9 +5,7 @@ import (
 	"testing"
 	"time"
 
-  "github.com/15446-rus75/task-5/pkg/conveyer"
 	"github.com/stretchr/testify/assert"
-	"github.com/stretchr/testify/require"
 )
 
 func TestPrefixDecoratorFunc_Basic(t *testing.T) {
